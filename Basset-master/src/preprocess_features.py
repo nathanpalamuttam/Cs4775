@@ -63,7 +63,7 @@ def main():
         target_dbi.append(len(db_targets))
         db_targets.append(a[0])
         target_beds.append(a[1])
-
+    print(target_beds)
     # read in chromosome lengths
     chrom_lengths = {}
     if options.chrom_lengths_file:
