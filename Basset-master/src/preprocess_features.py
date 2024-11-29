@@ -38,6 +38,7 @@ def main():
     else:
         target_beds_file = args[0]
     # determine whether we'll add to an existing DB
+    print(args[0])
     db_targets = []
     db_add = False
     if options.db_bed is not None:
