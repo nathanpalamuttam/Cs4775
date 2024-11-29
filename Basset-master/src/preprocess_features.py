@@ -37,7 +37,8 @@ def main():
         parser.error('Must provide file labeling the targets and providing BED file paths.')
     else:
         target_beds_file = args[0]
-
+    print("ARGS 0")
+    print(args[0])
     # determine whether we'll add to an existing DB
     db_targets = []
     db_add = False
