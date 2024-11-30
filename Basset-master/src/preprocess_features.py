@@ -88,8 +88,11 @@ def main():
             peak_bed_in = gzip.open(peak_beds[bi])
         else:
             peak_bed_in = open(peak_beds[bi])
-
+        change = False
         for line in peak_bed_in:
+            if change == False:
+                change = True
+                continue
             if not line.startswith('#'):
                 a = line.split('\t')
                 a[-1] = a[-1].rstrip()
