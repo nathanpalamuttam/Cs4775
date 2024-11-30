@@ -1,223 +1,189 @@
-#!/usr/bin/env python
-from __future__ import print_function
-from optparse import OptionParser
-from collections import OrderedDict
-import os
-import random
-import subprocess
+#!/usr/bin/env python3
 
+import argparse
 import h5py
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
 import numpy as np
-import pandas as pd
-import seaborn as sns
+import time
+from collections import defaultdict
 
-################################################################################
-# basset_db.py
-#
-# Study database motifs.
-#
-# Perhaps more meaningful than the mean change might be the higher end of the
-# distribution moving.
-################################################################################
 
-################################################################################
-# main
-################################################################################
+class ConvNet(nn.Module):
+    def __init__(self, job, input_depth, seq_len, num_targets):
+        super(ConvNet, self).__init__()
+        self.conv_layers = nn.Sequential(
+            nn.Conv1d(input_depth, job['conv_filters'][0], job['conv_filter_sizes'][0]),
+            nn.ReLU(),
+            nn.MaxPool1d(job['pool_width'][0]),
+            nn.Conv1d(job['conv_filters'][0], job['conv_filters'][1], job['conv_filter_sizes'][1]),
+            nn.ReLU(),
+            nn.MaxPool1d(job['pool_width'][1]),
+            nn.Conv1d(job['conv_filters'][1], job['conv_filters'][2], job['conv_filter_sizes'][2]),
+            nn.ReLU(),
+            nn.MaxPool1d(job['pool_width'][2])
+        )
+
+        # Dynamically calculate output size after convolutional layers
+        conv_out_size = self._get_conv_output(seq_len, input_depth, job)
+        self.fc_layers = nn.Sequential(
+            nn.Linear(conv_out_size, job['hidden_units'][0]),
+            nn.ReLU(),
+            nn.Dropout(job['hidden_dropouts'][0]),
+            nn.Linear(job['hidden_units'][0], num_targets)
+        )
+
+    def _get_conv_output(self, seq_len, input_depth, job):
+        x = torch.zeros(1, input_depth, seq_len)  # Dummy input
+        x = self.conv_layers(x)
+        return x.numel()  # Total number of features after convolutions
+
+    def forward(self, x):
+        x = x.squeeze(2)  # Ensure input shape is [Batch, Channels, Sequence Length]
+        x = self.conv_layers(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc_layers(x)
+        return x
+
+
+def load_hdf5_data(data_file):
+    """Load training and validation data from HDF5 file."""
+    with h5py.File(data_file, 'r') as f:
+        train_seqs = torch.tensor(f['train_in'][:], dtype=torch.float32)
+        train_targets = torch.tensor(f['train_out'][:], dtype=torch.float32)
+        valid_seqs = torch.tensor(f['valid_in'][:], dtype=torch.float32)
+        valid_targets = torch.tensor(f['valid_out'][:], dtype=torch.float32)
+
+    # Debug: Check dataset statistics
+    print(f"Training data shape: {train_seqs.shape}, Targets shape: {train_targets.shape}")
+    print(f"Validation data shape: {valid_seqs.shape}, Targets shape: {valid_targets.shape}")
+    print(f"Training targets (first 10): {train_targets[:10]}")
+
+    return train_seqs, train_targets, valid_seqs, valid_targets
+
+
+def check_data_leakage(train_seqs, valid_seqs):
+    """Check for data leakage between training and validation datasets."""
+    # Convert each sequence to a tuple of tuples (to make it hashable)
+    train_set = set(tuple(map(tuple, seq.tolist())) for seq in train_seqs)
+    valid_set = set(tuple(map(tuple, seq.tolist())) for seq in valid_seqs)
+
+    overlap = len(train_set.intersection(valid_set))
+    print(f"Data overlap between train and validation sets: {overlap}")
+    if overlap > 0:
+        print("Warning: Data leakage detected!")
+
+
+
+def validate_data_variance(data, name):
+    """Validate that input sequences have meaningful variance."""
+    mean = data.mean().item()
+    std = data.std().item()
+    print(f"{name} - Mean: {mean}, Std Dev: {std}")
+
+
+def train_epoch(model, criterion, optimizer, train_loader, device):
+    """Train for one epoch."""
+    model.train()
+    total_loss = 0
+    for inputs, targets in train_loader:
+        inputs, targets = inputs.to(device), targets.to(device)
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, targets)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    return total_loss / len(train_loader)
+
+
+def validate(model, criterion, valid_loader, device):
+    """Validate the model."""
+    model.eval()
+    total_loss = 0
+    correct = 0
+    with torch.no_grad():
+        for inputs, targets in valid_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+            total_loss += loss.item()
+            correct += (outputs.argmax(1) == targets.argmax(1)).sum().item()
+    return total_loss / len(valid_loader), correct / len(valid_loader.dataset)
+
+
 def main():
-    usage = 'usage: %prog [options] <db_file> <model_file> <test_hdf5_file>'
-    parser = OptionParser(usage)
-    parser.add_option('-a', dest='add_motif', default=None, help='Pre-inserted additional upstream motif')
-    parser.add_option('--cuda', dest='cuda', default=False, action='store_true', help='Run on GPGPU [Default: %default]')
-    parser.add_option('--cudnn', dest='cudnn', default=False, action='store_true', help='Run on GPGPU w/cuDNN [Default: %default]')
-    parser.add_option('-d', dest='model_hdf5_file', default=None, help='Pre-computed model output as HDF5.')
-    parser.add_option('-m', dest='motifs_study', default='', help='Comma-separated list of motifs to study in more detail [Default: %default]')
-    parser.add_option('-o', dest='out_dir', default='.')
-    parser.add_option('-s', dest='sample', default=256, type='int', help='Sequences to sample [Default: %default]')
-    parser.add_option('-t', dest='targets_study', default='', help='Comma-separated list of targets to study in more detail [Default: %default]')
-    (options,args) = parser.parse_args()
+    # Parse arguments
+    parser = argparse.ArgumentParser(description='DNA ConvNet Training')
+    parser.add_argument('data_file', help='Path to the HDF5 data file')
+    parser.add_argument('--cuda', action='store_true', help='Use GPU for training')
+    parser.add_argument('--max_epochs', type=int, default=1000, help='Maximum training epochs')
+    parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
+    parser.add_argument('--save', default='dnacnn', help='Prefix for saved models')
+    args = parser.parse_args()
 
-    if len(args) != 3:
-        parser.error('Must provide MEME db file, Basset model file, and test data in HDF5 format.')
-    else:
-        db_file = args[0]
-        model_file = args[1]
-        test_hdf5_file = args[2]
+    # Set device
+    device = torch.device('cuda' if args.cuda and torch.cuda.is_available() else 'cpu')
 
-    if not os.path.isdir(options.out_dir):
-        os.mkdir(options.out_dir)
+    # Load data
+    train_seqs, train_targets, valid_seqs, valid_targets = load_hdf5_data(args.data_file)
 
-    # these both currently don't do anything
-    # options.motifs_study = options.motifs_study.split(',')
-    # options.targets_study = [int(ti) for ti in options.targets_study.split(',')]
+    print(f"Unique training targets: {torch.unique(train_targets)}")
+    print(f"Unique validation targets: {torch.unique(valid_targets)}")
 
-    #################################################################
-    # load data
-    #################################################################
-    # load sequences
-    test_hdf5_in = h5py.File(test_hdf5_file, 'r')
-    seq_vecs = np.array(test_hdf5_in['test_in'])
-    seq_targets = np.array(test_hdf5_in['test_out'])
-    target_labels = np.array(test_hdf5_in['target_labels'])
-    test_hdf5_in.close()
+    # Ensure correct loss function
+    if train_targets.shape[1] == 1:  # Binary classification
+        criterion = nn.BCEWithLogitsLoss()
+        train_targets = train_targets.squeeze(1)  # Remove extra dimension if needed
+        valid_targets = valid_targets.squeeze(1)
+    else:  # Multi-class classification
+        criterion = nn.CrossEntropyLoss()
+    # Debug: Check for data leakage and input variance
+    check_data_leakage(train_seqs, valid_seqs)
+    validate_data_variance(train_seqs, "Train Sequences")
+    validate_data_variance(valid_seqs, "Validation Sequences")
 
+    # Hyperparameters
+    job = {
+        'conv_filters': [64, 128, 256],  # Reduced model complexity
+        'conv_filter_sizes': [15, 5, 3],
+        'pool_width': [4, 4, 2],
+        'hidden_units': [128],
+        'hidden_dropouts': [0.5]
+    }
 
-    #################################################################
-    # sample
-    #################################################################
-    if options.sample is not None:
-        # choose sampled indexes
-        sample_i = np.array(random.sample(xrange(seq_vecs.shape[0]), options.sample))
+    # Model, criterion, optimizer
+    model = ConvNet(job, train_seqs.shape[1], train_seqs.shape[2], train_targets.shape[1]).to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters())
 
-        # filter
-        seq_vecs = seq_vecs[sample_i]
-        seq_targets = seq_targets[sample_i]
+    # Data loaders
+    train_loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(train_seqs, train_targets), batch_size=args.batch_size, shuffle=True
+    )
+    valid_loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(valid_seqs, valid_targets), batch_size=args.batch_size
+    )
 
-        # create a new HDF5 file
-        sample_hdf5_file = '%s/sample.h5' % options.out_dir
-        sample_hdf5_out = h5py.File(sample_hdf5_file, 'w')
-        sample_hdf5_out.create_dataset('test_in', data=seq_vecs)
-        sample_hdf5_out.close()
+    # Training loop
+    best_valid_acc = 0
+    for epoch in range(1, args.max_epochs + 1):
+        start_time = time.time()
 
-        # update test HDF5
-        test_hdf5_file = sample_hdf5_file
+        train_loss = train_epoch(model, criterion, optimizer, train_loader, device)
+        valid_loss, valid_acc = validate(model, criterion, valid_loader, device)
 
+        epoch_time = time.time() - start_time
+        print(f"Epoch {epoch}: Train Loss={train_loss:.4f}, Valid Loss={valid_loss:.4f}, Valid Acc={valid_acc:.4f}, Time={epoch_time:.2f}s")
 
-    #################################################################
-    # write motifs to hdf5
-    #################################################################
-    db_motifs = OrderedDict()
-    read_motif = False
-    for line in open(db_file):
-        a = line.split()
-        if len(a) == 0:
-            read_motif = False
-        else:
-            if a[0] == 'MOTIF':
-                if a[2][0] == '(':
-                    protein = a[2][1:a[2].find(')')]
-                else:
-                    protein = a[2]
+        # Save best model
+        if valid_acc > best_valid_acc:
+            best_valid_acc = valid_acc
+            torch.save(model.state_dict(), f"{args.save}_best.pth")
+            print("Saved best model!")
 
-            elif a[0] == 'letter-probability':
-                read_motif = True
-                db_motifs[protein] = []
-
-            elif read_motif:
-                db_motifs[protein].append(np.array([float(p) for p in a]))
-
-    # convert to arrays and transpose
-    for protein in db_motifs:
-        db_motifs[protein] = np.array(db_motifs[protein]).T
-
-    # write to hdf5
-    motifs_hdf5_file = '%s/motifs.h5' % options.out_dir
-    motifs_hdf5_out = h5py.File(motifs_hdf5_file, 'w')
-    mi = 1
-    for protein in db_motifs:
-        motifs_hdf5_out.create_dataset(str(mi), data=db_motifs[protein])
-        mi += 1
-    motifs_hdf5_out.close()
+    print(f"Best Validation Accuracy: {best_valid_acc:.4f}")
 
 
-    #################################################################
-    # Torch predict
-    #################################################################
-    if options.model_hdf5_file is None:
-        options.model_hdf5_file = '%s/model_out.h5' % options.out_dir
-        opts_str = ''
-        if options.add_motif is not None:
-            opts_str += ' -add_motif %s' % options.add_motif
-        if options.cudnn:
-            opts_str += ' -cudnn'
-        elif options.cuda:
-            opts_str += ' -cuda'
-
-        torch_cmd = '%s/src/basset_db_predict.lua %s %s %s %s %s' % (os.environ['BASSETDIR'],opts_str, motifs_hdf5_file, model_file, test_hdf5_file, options.model_hdf5_file)
-        print(torch_cmd)
-        subprocess.call(torch_cmd, shell=True)
-
-    # load model output
-    model_hdf5_in = h5py.File(options.model_hdf5_file, 'r')
-    scores_diffs = np.array(model_hdf5_in['scores_diffs'])
-    preds_diffs = np.array(model_hdf5_in['preds_diffs'])
-    reprs_diffs = []
-    l = 1
-    while 'reprs%d'%l in model_hdf5_in:
-        reprs_diffs.append(np.array(model_hdf5_in['reprs%d'%l]))
-        l += 1
-    model_hdf5_in.close()
-
-
-    #################################################################
-    # score diffs
-    #################################################################
-    motif_scores_df = pd.DataFrame(scores_diffs, index=db_motifs.keys(), columns=target_labels)
-
-    # plot heat map
-    plt.figure()
-    g = sns.clustermap(motif_scores_df, figsize=(9,30))
-
-    for tick in g.ax_heatmap.get_xticklabels():
-        tick.set_rotation(-45)
-        tick.set_horizontalalignment('left')
-        tick.set_fontsize(2.5)
-    for tick in g.ax_heatmap.get_yticklabels():
-        tick.set_fontsize(2.5)
-
-    plt.savefig('%s/heat_scores.pdf' % options.out_dir)
-    plt.close()
-
-    # print table
-    table_out = open('%s/table_scores.txt' % options.out_dir, 'w')
-
-    mi = 0
-    for protein in db_motifs:
-        for ti in range(scores_diffs.shape[1]):
-            cols = (protein, ti, scores_diffs[mi,ti], preds_diffs[mi,ti])
-            print('%-10s  %3d  %6.3f  %6.3f' % cols, file=table_out)
-        mi += 1
-
-    table_out.close()
-
-
-    #################################################################
-    # filter diffs
-    #################################################################
-    for l in range(1):
-        motif_filters_df = pd.DataFrame(reprs_diffs[l], index=db_motifs.keys())
-
-        # plot heat map
-        plt.figure()
-        g = sns.clustermap(motif_filters_df, figsize=(13,30))
-
-        for tick in g.ax_heatmap.get_xticklabels():
-            tick.set_rotation(-45)
-            tick.set_horizontalalignment('left')
-            tick.set_fontsize(2.5)
-        for tick in g.ax_heatmap.get_yticklabels():
-            tick.set_fontsize(2.5)
-
-        plt.savefig('%s/heat_filters%d.pdf' % (options.out_dir,l+1))
-        plt.close()
-
-        # print table
-        table_out = open('%s/table_filters%d.txt' % (options.out_dir,l+1), 'w')
-
-        mi = 0
-        for protein in db_motifs:
-            for fi in range(reprs_diffs[l].shape[1]):
-                cols = (protein, fi, reprs_diffs[l][mi,fi])
-                print('%-10s  %3d  %7.4f' % cols, file=table_out)
-            mi += 1
-
-        table_out.close()
-
-
-################################################################################
-# __main__
-################################################################################
 if __name__ == '__main__':
     main()

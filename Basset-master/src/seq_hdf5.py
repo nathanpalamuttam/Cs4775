@@ -45,7 +45,7 @@ def main():
     parser.add_option('--vt', dest='valid_test',
         default=False, action='store_true',
         help='Use validation as test, too [Default: %default]')
-    (options,args) = parser.parse_args()
+    (options, args) = parser.parse_args()
 
     if len(args) != 3:
         parser.error('Must provide fasta file, targets file, and an output prefix')
@@ -54,34 +54,37 @@ def main():
         targets_file = args[1]
         out_file = args[2]
 
-    # seed rng before shuffle
+    # seed RNG before shuffle
     npr.seed(options.random_seed)
 
     #################################################################
-    # load data
+    # Load data
     #################################################################
-    seqs, targets = dna_io.load_data_1hot(fasta_file, targets_file, extend_len=options.extend_length,
-                                          mean_norm=False, whiten=False, permute=False, sort=False)
+    seqs, targets = dna_io.load_data_1hot(
+        fasta_file, targets_file, extend_len=options.extend_length,
+        mean_norm=False, whiten=False, permute=False, sort=False
+    )
 
-    # reshape sequences for torch
-    seqs = seqs.reshape((seqs.shape[0],4,1,seqs.shape[1]/4))
+    # Reshape sequences for Torch
+    seqs = seqs.reshape((seqs.shape[0], 4, seqs.shape[1] // 4))
 
-    # read headers
+    # Read headers
     headers = []
-    for line in open(fasta_file):
-        if line[0] == '>':
-            headers.append(line[1:].rstrip())
-    headers = np.array(headers)
+    with open(fasta_file) as f:
+        for line in f:
+            if line.startswith('>'):
+                headers.append(line[1:].rstrip())
+    headers = np.array(headers, dtype='S')  # Convert to fixed-length byte strings
 
-    # read labels
+    # Read labels
     target_labels = open(targets_file).readline().strip().split('\t')
 
-    # read additional features
+    # Read additional features (if provided)
     if options.add_features_file:
         df_add = pd.read_table(options.add_features_file, index_col=0)
         df_add = df_add.astype(np.float32, copy=False)
 
-    # permute
+    # Permute data
     order = npr.permutation(seqs.shape[0])
     seqs = seqs[order]
     targets = targets[order]
@@ -89,14 +92,14 @@ def main():
     if options.add_features_file:
         df_add = df_add.iloc[order]
 
-    # check proper sum
+    # Check proper sum
     if options.counts:
-        assert(options.test_pct + options.valid_pct <= seqs.shape[0])
+        assert options.test_pct + options.valid_pct <= seqs.shape[0]
     else:
-        assert(options.test_pct + options.valid_pct <= 1.0)
+        assert options.test_pct + options.valid_pct <= 1.0
 
     #################################################################
-    # divide data
+    # Divide data
     #################################################################
     if options.counts:
         test_count = int(options.test_pct)
@@ -107,20 +110,20 @@ def main():
 
     train_count = seqs.shape[0] - test_count - valid_count
     train_count = batch_round(train_count, options.batch_size)
-    print('%d training sequences ' % train_count, file=sys.stderr)
+    print(f'{train_count} training sequences', file=sys.stderr)
 
     test_count = batch_round(test_count, options.batch_size)
-    print('%d test sequences ' % test_count, file=sys.stderr)
+    print(f'{test_count} test sequences', file=sys.stderr)
 
     valid_count = batch_round(valid_count, options.batch_size)
-    print('%d validation sequences ' % valid_count, file=sys.stderr)
+    print(f'{valid_count} validation sequences', file=sys.stderr)
 
     i = 0
-    train_seqs, train_targets = seqs[i:i+train_count,:], targets[i:i+train_count,:]
+    train_seqs, train_targets = seqs[i:i+train_count], targets[i:i+train_count]
     i += train_count
-    valid_seqs, valid_targets, valid_headers = seqs[i:i+valid_count,:], targets[i:i+valid_count,:], headers[i:i+valid_count]
+    valid_seqs, valid_targets, valid_headers = seqs[i:i+valid_count], targets[i:i+valid_count], headers[i:i+valid_count]
     i += valid_count
-    test_seqs, test_targets, test_headers = seqs[i:i+test_count,:], targets[i:i+test_count,:], headers[i:i+test_count]
+    test_seqs, test_targets, test_headers = seqs[i:i+test_count], targets[i:i+test_count], headers[i:i+test_count]
 
     if options.add_features_file:
         i = 0
@@ -131,47 +134,43 @@ def main():
         test_add = df_add.iloc[i:i+test_count]
 
     #################################################################
-    # construct hdf5 representation
+    # Construct HDF5 representation
     #################################################################
-    h5f = h5py.File(out_file, 'w')
-
-    h5f.create_dataset('target_labels', data=target_labels)
-
-    if train_count > 0:
-        h5f.create_dataset('train_in', data=train_seqs)
-        h5f.create_dataset('train_out', data=train_targets)
-
-    if valid_count > 0:
-        h5f.create_dataset('valid_in', data=valid_seqs)
-        h5f.create_dataset('valid_out', data=valid_targets)
-
-    if test_count > 0:
-        h5f.create_dataset('test_in', data=test_seqs)
-        h5f.create_dataset('test_out', data=test_targets)
-        h5f.create_dataset('test_headers', data=test_headers)
-    elif options.valid_test:
-        h5f.create_dataset('test_in', data=valid_seqs)
-        h5f.create_dataset('test_out', data=valid_targets)
-        h5f.create_dataset('test_headers', data=valid_headers)
-
-    if options.add_features_file:
-        h5f.create_dataset('add_labels', data=list(df_add.columns))
+    with h5py.File(out_file, 'w') as h5f:
+        h5f.create_dataset('target_labels', data=np.array(target_labels, dtype='S'))
 
         if train_count > 0:
-            h5f.create_dataset('train_add', data=train_add.as_matrix())
-        if valid_count > 0:
-            h5f.create_dataset('valid_add', data=valid_add.as_matrix())
-        if test_count > 0:
-            h5f.create_dataset('test_add', data=test_add.as_matrix())
-        elif options.valid_test:
-            h5f.create_dataset('test_add', data=valid_add.as_matrix())
+            h5f.create_dataset('train_in', data=train_seqs)
+            h5f.create_dataset('train_out', data=train_targets)
 
-    h5f.close()
+        if valid_count > 0:
+            h5f.create_dataset('valid_in', data=valid_seqs)
+            h5f.create_dataset('valid_out', data=valid_targets)
+
+        if test_count > 0:
+            h5f.create_dataset('test_in', data=test_seqs)
+            h5f.create_dataset('test_out', data=test_targets)
+            h5f.create_dataset('test_headers', data=np.array(test_headers, dtype='S'))
+        elif options.valid_test:
+            h5f.create_dataset('test_in', data=valid_seqs)
+            h5f.create_dataset('test_out', data=valid_targets)
+            h5f.create_dataset('test_headers', data=np.array(valid_headers, dtype='S'))
+
+        if options.add_features_file:
+            h5f.create_dataset('add_labels', data=np.array(df_add.columns, dtype='S'))
+            if train_count > 0:
+                h5f.create_dataset('train_add', data=train_add.to_numpy())
+            if valid_count > 0:
+                h5f.create_dataset('valid_add', data=valid_add.to_numpy())
+            if test_count > 0:
+                h5f.create_dataset('test_add', data=test_add.to_numpy())
+            elif options.valid_test:
+                h5f.create_dataset('test_add', data=valid_add.to_numpy())
 
 
 def batch_round(count, batch_size):
-    if batch_size != None:
-        count -= (batch_size % count)
+    if batch_size is not None:
+        count -= count % batch_size
     return count
 
 ################################################################################

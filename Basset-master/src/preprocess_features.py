@@ -178,7 +178,7 @@ def main():
     print('\t'.join(cols), file=final_act_out)
 
     # print sequences
-    for line in open(f'{options.out_prefix}.bed'):
+    for line in open(f'learn_cd4_chr10_+_sort.bed'):
         a = line.rstrip().split('\t')
         peak_id = f'{a[0]}:{a[1]}-{a[2]}({a[5]})'
 
