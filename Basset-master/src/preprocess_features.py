@@ -102,6 +102,7 @@ def main():
                 chrom_key = (chrom, strand)
 
                 # adjust coordinates to midpoint
+                print(a)
                 start = int(a[1])
                 end = int(a[2])
                 mid = find_midpoint(start, end)
