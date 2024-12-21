@@ -21,3 +21,12 @@
 6. Extract the BED file into a sequence file using the following command:
    ```bash
    bedtools getfasta -fi hg38.fasta -bed regions.bed -s -fo extracted_sequences_strand.fasta
+
+## Running TBiNet
+
+1. Update the `testmat` variable in the script to point to the location of your extracted FASTA file:
+   ```python
+   testmat = "path/to/extracted_sequences_strand.fasta"
+2. Run the script to test the model.
+3. The AUROC scores will be generated automatically as output.
+
