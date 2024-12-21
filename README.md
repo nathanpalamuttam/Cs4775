@@ -30,3 +30,5 @@
 2. Run the script to test the model.
 3. The AUROC scores will be generated automatically as output.
 
+## Running DeepBind
+
