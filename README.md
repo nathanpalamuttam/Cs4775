@@ -21,6 +21,10 @@
 6. Extract the BED file into a sequence file using the following command:
    ```bash
    bedtools getfasta -fi hg38.fasta -bed regions.bed -s -fo extracted_sequences_strand.fasta
+7. To convert the dataset into the required file types:
+   - Download 7Zip
+   - Extract .gz
+   - Extract .tar
 
 ## Running TBiNet
 
@@ -31,4 +35,8 @@
 3. The AUROC scores will be generated automatically as output.
 
 ## Running DeepBind
-
+1. Set up your python virtual environment by installing cPicke, deepbind_util, tensorflow.
+2. Convert the untared file from step 7 above back into the .gz file.
+3. Using the scripts provided in the DeepBind folder, change the data directory path to be the data of the sequence.gz file you converted above.
+4. Run the training process by calling python deepbind_train.py top. This would run training on the top 500 examples. You can also pass all as the argument for the first 1000.
+5. Testing can also be done by repeating the steps above for the test file. 
